@@ -1,0 +1,55 @@
+name: Build Stremio Stereo
+
+on:
+  push:
+    paths:
+      - .github/workflows/build-stereo.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - name: Fetch exact official Stremio 5.0.24 source
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch v5.0.24 https://github.com/Stremio/stremio-shell-ng.git source
+          if ($LASTEXITCODE -ne 0) { throw "Official source clone failed" }
+          $actual = (git -C source rev-parse HEAD).Trim()
+          if ($actual -ne 'f53412abfdf114dbb803a6e33f6e84aafdbb11f8') { throw "Official source commit mismatch" }
+
+      - name: Patch integrated MPV stereo downmix
+        shell: pwsh
+        run: |
+          $path = 'source/src/stremio_app/stremio_player/player.rs'
+          $content = [IO.File]::ReadAllText($path)
+          $marker = 'set_property!("audio-client-name", "Stremio");'
+          if ([regex]::Matches($content, [regex]::Escape($marker)).Count -ne 1) { throw "Source does not match expected code" }
+          $replacement = $marker + "`n        " + 'set_property!("audio-channels", "stereo");' + "`n        " + 'set_property!("audio-normalize-downmix", "yes");'
+          [IO.File]::WriteAllText($path, $content.Replace($marker, $replacement), [Text.UTF8Encoding]::new($false))
+          if (-not ([IO.File]::ReadAllText($path)).Contains('set_property!("audio-channels", "stereo");')) { throw "Stereo patch missing" }
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: x86_64-pc-windows-msvc
+
+      - name: Build patched native executable
+        shell: pwsh
+        working-directory: source
+        run: |
+          cargo build --release --locked --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "Patched Stremio compilation failed" }
+          if (-not (Test-Path 'target/x86_64-pc-windows-msvc/release/stremio-shell-ng.exe')) { throw "No build output" }
+
+      - name: Upload executable for D drive installation
+        uses: actions/upload-artifact@v4
+        with:
+          name: stremio-stereo-5-0-24
+          path: source/target/x86_64-pc-windows-msvc/release/stremio-shell-ng.exe
+          if-no-files-found: error
